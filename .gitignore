@@ -1,0 +1,20 @@
+# Build outputs
+build/
+install/
+out/
+
+# Generated RKNN models
+models/*.rknn
+
+# Temporary captures and test outputs
+*.jpg.tmp
+out.jpg
+ppocr_text_snapshot.jpg
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.user
+Thumbs.db
+Desktop.ini
+
