@@ -99,7 +99,7 @@ $env:BOARD_PW="<board-password>"
 
 1. 同步本仓库到 Ubuntu：`/home/alientek/paddle-ocr-rv1126b`
 2. 如缺少 RKNN，使用 RKNN-Toolkit2 转换 ONNX
-3. 使用 SDK Buildroot 工具链交叉编译 `ppocr_text`
+3. 使用 SDK Buildroot 工具链交叉编译 `ppocr_text` 和 `ppocrd`
 4. 部署到板子：`/data/ppocr-text`
 
 只构建不部署：
@@ -189,10 +189,13 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --image test.jpg
 
 # 指定 snapshot URL
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --snapshot-url http://127.0.0.1:8080/api/v1/snapshot.jpg
 
 # 请求服务并播报
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --speak
+
+# 请求服务并指定 TTS 参数
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --speak --tts-socket /run/melottsd.sock --tts-priority 4
 
 # 不走 daemon，一次性本地加载模型并识别
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --image test.jpg
@@ -203,6 +206,14 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocrd --daemon
 # 仅在摄像头未被 camera_core_d 占用时使用
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 1280 --height 720
 ```
+
+`ppocrd` 的 socket 请求协议是一行文本，当前客户端会发送类似：
+
+```text
+ocr speak=1 image=test.jpg tts_priority=4
+```
+
+默认 `speak=0`，只返回 OCR 文本。
 
 ## 已验证
 

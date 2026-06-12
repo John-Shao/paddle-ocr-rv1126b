@@ -100,7 +100,7 @@ This command:
 
 1. Syncs this repository to Ubuntu: `/home/alientek/paddle-ocr-rv1126b`
 2. Converts ONNX to RKNN with RKNN-Toolkit2 if the RKNN files are missing
-3. Cross-compiles `ppocr_text` with the SDK Buildroot toolchain
+3. Cross-compiles `ppocr_text` and `ppocrd` with the SDK Buildroot toolchain
 4. Deploys to the board: `/data/ppocr-text`
 
 Build without deploying:
@@ -190,10 +190,13 @@ Other commands:
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --image test.jpg
 
 # Override the snapshot URL
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --snapshot-url http://127.0.0.1:8080/api/v1/snapshot.jpg
 
 # Request OCR and speech playback
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --speak
+
+# Request OCR and override TTS parameters
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --speak --tts-socket /run/melottsd.sock --tts-priority 4
 
 # Run once without the daemon, loading models in this process
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --image test.jpg
@@ -204,6 +207,14 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocrd --daemon
 # Use only when the camera is not occupied by camera_core_d
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 1280 --height 720
 ```
+
+The `ppocrd` socket protocol is one text line. The current client sends requests like:
+
+```text
+ocr speak=1 image=test.jpg tts_priority=4
+```
+
+By default `speak=0`, so the service only returns OCR text.
 
 ## Verified
 

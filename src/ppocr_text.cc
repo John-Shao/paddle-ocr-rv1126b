@@ -45,7 +45,9 @@ struct Options {
     int warmup = 3;
     std::string daemon_socket = "/run/ppocrd.sock";
     std::string tts_socket = "/run/melottsd.sock";
+    bool tts_socket_set = false;
     int tts_priority = 4;
+    bool tts_priority_set = false;
     bool daemon = false;
     bool speak = false;
     bool verbose = false;
@@ -113,8 +115,14 @@ Options parse_options(int argc, char** argv) {
     if (const char* v = arg_value(argc, argv, "--height")) opt.height = std::atoi(v);
     if (const char* v = arg_value(argc, argv, "--warmup")) opt.warmup = std::atoi(v);
     if (const char* v = arg_value(argc, argv, "--daemon-socket")) opt.daemon_socket = v;
-    if (const char* v = arg_value(argc, argv, "--tts-socket")) opt.tts_socket = v;
-    if (const char* v = arg_value(argc, argv, "--tts-priority")) opt.tts_priority = std::atoi(v);
+    if (const char* v = arg_value(argc, argv, "--tts-socket")) {
+        opt.tts_socket = v;
+        opt.tts_socket_set = true;
+    }
+    if (const char* v = arg_value(argc, argv, "--tts-priority")) {
+        opt.tts_priority = std::atoi(v);
+        opt.tts_priority_set = true;
+    }
     opt.daemon = has_flag(argc, argv, "--daemon");
     opt.speak = has_flag(argc, argv, "--speak") && !has_flag(argc, argv, "--no-tts");
     opt.verbose = has_flag(argc, argv, "--verbose");
@@ -620,6 +628,7 @@ bool handle_client(int fd, const Options& base_opt, ppocr_system_app_context& ap
         opt.snapshot_url = v;
         opt.image.clear();
     }
+    if (std::string v = request_value(req, "tts_socket"); !v.empty()) opt.tts_socket = v;
     if (std::string v = request_value(req, "tts_priority"); !v.empty()) opt.tts_priority = std::atoi(v.c_str());
 
     std::string text;
@@ -685,6 +694,8 @@ int run_service_client(const Options& opt) {
     if (opt.verbose) req += " verbose=1";
     if (!opt.image.empty()) req += " image=" + opt.image;
     if (opt.snapshot_url_set) req += " snapshot_url=" + opt.snapshot_url;
+    if (opt.tts_socket_set) req += " tts_socket=" + opt.tts_socket;
+    if (opt.tts_priority_set) req += " tts_priority=" + std::to_string(opt.tts_priority);
     req += "\n";
     if (!write_string(fd, req)) {
         std::fprintf(stderr, "write ppocrd request failed\n");
