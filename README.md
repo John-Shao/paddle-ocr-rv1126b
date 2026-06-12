@@ -2,13 +2,14 @@
 
 [中文](README_CN.md) | English
 
-Pure C/C++ OCR text recognition for RV1126B:
+Pure C/C++ OCR text recognition and speech playback for RV1126B:
 
 ```text
-board camera snapshot -> PP-OCRv4 RKNN -> stdout text
+board camera snapshot -> PP-OCRv4 RKNN -> stdout text -> melottsd playback
 ```
 
-The current stage only performs OCR and text output. **TTS is not connected yet.**
+When text is recognized, the program speaks the recognized text. When no text is
+recognized, it speaks `没有识别到文字信息`.
 
 ## Constraints
 
@@ -16,6 +17,7 @@ The current stage only performs OCR and text output. **TTS is not connected yet.
 - ONNX -> RKNN conversion is done offline on the Ubuntu cross-compilation host only.
 - The board does not open `/dev/video-camera0` by default, to avoid competing with `camera_core_d`.
 - The default capture source is the on-board snapshot endpoint: `http://127.0.0.1:8080/api/v1/snapshot.jpg`.
+- Speech playback is enabled by default through `/run/melottsd.sock` from `melotts-rv1126b`.
 
 ## Environment
 
@@ -129,6 +131,9 @@ Run remotely from Windows:
 ```powershell
 $env:BOARD_PW="<board-password>"
 .\scripts\run_board.ps1
+
+# Run with arguments, for example recognize a still image without speech
+.\scripts\run_board.ps1 -ProgramArgs "--image test.jpg --no-tts"
 ```
 
 Run directly on the board:
@@ -143,6 +148,7 @@ Output format:
 ```text
 Text recognized: UTF-8 text, one line per OCR line
 No text:         [NO_TEXT]
+Speech:          enabled by default
 ```
 
 Other commands:
@@ -156,6 +162,12 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --snapshot-url http://127.0.0.1:8080
 
 # Debug mode: print RKNN tensor information
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --verbose
+
+# Print text only, do not call TTS
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --no-tts
+
+# Override the melottsd socket and playback priority
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --tts-socket /run/melottsd.sock --tts-priority 4
 
 # Use only when the camera is not occupied by camera_core_d
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 1280 --height 720
@@ -176,6 +188,7 @@ Recognizes Chinese text from the Rockchip PPOCR-System test image.
 ```
 
 Captures the current camera frame through the `camera_core_d` snapshot endpoint. If the current scene contains no recognizable text, it prints `[NO_TEXT]`.
+It also calls melottsd to speak the recognized text. If no text is recognized, it speaks `没有识别到文字信息`.
 
 ## Documentation Sync
 

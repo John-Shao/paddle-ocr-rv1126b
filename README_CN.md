@@ -2,13 +2,13 @@
 
 中文 | [English](README.md)
 
-RV1126B 上的纯 C/C++ OCR 文本识别程序：
+RV1126B 上的纯 C/C++ OCR 文字识别和语音播报程序：
 
 ```text
-板端摄像头 snapshot -> PP-OCRv4 RKNN -> stdout 文本
+板端摄像头 snapshot -> PP-OCRv4 RKNN -> stdout 文本 -> melottsd 播放
 ```
 
-当前阶段只做文字识别和文本输出，**暂不串联 TTS**。
+识别到文字时播放识别文本；未识别到文字时播放“没有识别到文字信息”。
 
 ## 约束
 
@@ -16,6 +16,7 @@ RV1126B 上的纯 C/C++ OCR 文本识别程序：
 - ONNX -> RKNN 只在 Ubuntu 交叉编译机上离线完成。
 - 板端默认不直接打开 `/dev/video-camera0`，避免和 `camera_core_d` 抢摄像头。
 - 默认通过板内接口抓图：`http://127.0.0.1:8080/api/v1/snapshot.jpg`。
+- 默认通过 `/run/melottsd.sock` 调用板端 `melotts-rv1126b` 播放语音。
 
 ## 环境
 
@@ -129,6 +130,9 @@ Windows 远程运行：
 ```powershell
 $env:BOARD_PW="<board-password>"
 .\scripts\run_board.ps1
+
+# 带参数运行，例如识别静态图片且不播报
+.\scripts\run_board.ps1 -ProgramArgs "--image test.jpg --no-tts"
 ```
 
 直接在板子上运行：
@@ -143,6 +147,7 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text
 ```text
 识别到文字：逐行输出 UTF-8 文本
 未识别到文字：[NO_TEXT]
+语音播报：默认开启
 ```
 
 其他命令：
@@ -156,6 +161,12 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --snapshot-url http://127.0.0.1:8080
 
 # 调试模式，输出 RKNN tensor 信息
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --verbose
+
+# 只输出文本，不调用 TTS
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --no-tts
+
+# 指定 melottsd socket 和播放优先级
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --tts-socket /run/melottsd.sock --tts-priority 4
 
 # 仅在摄像头未被 camera_core_d 占用时使用
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 1280 --height 720
@@ -175,7 +186,8 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 
 ./ppocr_text
 ```
 
-可通过 `camera_core_d` snapshot 抓取当前摄像头画面；当前画面无文字时输出 `[NO_TEXT]`。
+可通过 `camera_core_d` snapshot 抓取当前摄像头画面，并调用 melottsd 播放识别文本。
+当前画面无文字时输出 `[NO_TEXT]`，并播放“没有识别到文字信息”。
 
 ## 文档同步
 

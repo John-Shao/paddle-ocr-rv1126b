@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <linux/videodev2.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -28,6 +29,7 @@ constexpr bool kUseDilation = false;
 constexpr const char* kDbScoreMode = "slow";
 constexpr const char* kDbBoxType = "poly";
 constexpr float kDbUnclipRatio = 1.5f;
+constexpr const char* kNoTextPrompt = "没有识别到文字信息";
 
 struct Options {
     std::string det_model = "models/ppocrv4_det_i8.rknn";
@@ -38,6 +40,9 @@ struct Options {
     int width = 1280;
     int height = 720;
     int warmup = 3;
+    std::string tts_socket = "/run/melottsd.sock";
+    int tts_priority = 4;
+    bool speak = true;
     bool verbose = false;
 };
 
@@ -70,7 +75,10 @@ void usage(const char* prog) {
         "  --image FILE     read still image instead of camera capture\n"
         "  --width N        camera width, default 1280\n"
         "  --height N       camera height, default 720\n"
-        "  --warmup N       frames to discard before capture, default 3\n",
+        "  --warmup N       frames to discard before capture, default 3\n"
+        "  --tts-socket PATH  melottsd socket, default /run/melottsd.sock\n"
+        "  --tts-priority N   melottsd priority, default 4\n"
+        "  --no-tts           print text only, do not speak\n",
         prog, prog, prog);
 }
 
@@ -84,6 +92,9 @@ Options parse_options(int argc, char** argv) {
     if (const char* v = arg_value(argc, argv, "--width")) opt.width = std::atoi(v);
     if (const char* v = arg_value(argc, argv, "--height")) opt.height = std::atoi(v);
     if (const char* v = arg_value(argc, argv, "--warmup")) opt.warmup = std::atoi(v);
+    if (const char* v = arg_value(argc, argv, "--tts-socket")) opt.tts_socket = v;
+    if (const char* v = arg_value(argc, argv, "--tts-priority")) opt.tts_priority = std::atoi(v);
+    opt.speak = !has_flag(argc, argv, "--no-tts");
     opt.verbose = has_flag(argc, argv, "--verbose");
     return opt;
 }
@@ -419,6 +430,76 @@ std::string join_text(const ppocr_text_recog_array_result_t& results) {
     return text;
 }
 
+std::string text_for_speech(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    bool last_was_sep = false;
+    for (char ch : text) {
+        if (ch == '\r' || ch == '\n' || ch == '\t') {
+            if (!last_was_sep && !out.empty()) {
+                out += "，";
+                last_was_sep = true;
+            }
+            continue;
+        }
+        out.push_back(ch);
+        last_was_sep = false;
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+    return out.empty() ? kNoTextPrompt : out;
+}
+
+int connect_unix_socket(const std::string& path) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    sockaddr_un addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+bool speak_text(const Options& opt, const std::string& text) {
+    int fd = connect_unix_socket(opt.tts_socket);
+    if (fd < 0) {
+        std::fprintf(stderr, "TTS unavailable: cannot connect %s: %s\n",
+                     opt.tts_socket.c_str(), std::strerror(errno));
+        return false;
+    }
+
+    std::string req = std::to_string(opt.tts_priority) + "\t" + text + "\n";
+    const char* p = req.data();
+    size_t left = req.size();
+    while (left > 0) {
+        ssize_t n = write(fd, p, left);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            std::fprintf(stderr, "TTS write failed: %s\n", std::strerror(errno));
+            close(fd);
+            return false;
+        }
+        p += n;
+        left -= static_cast<size_t>(n);
+    }
+
+    char ack[64];
+    ssize_t r;
+    do {
+        r = read(fd, ack, sizeof(ack) - 1);
+    } while (r < 0 && errno == EINTR);
+    close(fd);
+    if (r <= 0) {
+        std::fprintf(stderr, "TTS ack failed\n");
+        return false;
+    }
+    ack[r] = 0;
+    return std::strncmp(ack, "done", 4) == 0 || std::strncmp(ack, "preempted", 9) == 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -493,6 +574,9 @@ int main(int argc, char** argv) {
             std::printf("[NO_TEXT]\n");
         } else {
             std::printf("%s\n", text.c_str());
+        }
+        if (opt.speak) {
+            speak_text(opt, text_for_speech(text));
         }
     }
 
