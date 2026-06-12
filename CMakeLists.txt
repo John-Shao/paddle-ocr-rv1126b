@@ -31,36 +31,40 @@ endif()
 find_package(OpenCV REQUIRED)
 
 set(PPOCR_CPP ${MODEL_ZOO_ROOT}/examples/PPOCR/PPOCR-System/cpp)
-
-add_executable(ppocr_text
+set(PPOCR_SOURCES
     src/ppocr_text.cc
     ${PPOCR_CPP}/postprocess.cc
     ${PPOCR_CPP}/clipper.cc
     ${PPOCR_CPP}/rknpu2/ppocr_system.cc
 )
 
-target_include_directories(ppocr_text PRIVATE
-    ${PPOCR_CPP}
-    ${LIBRKNNRT_INCLUDES}
-)
+foreach(target ppocr_text ppocrd)
+    add_executable(${target} ${PPOCR_SOURCES})
 
-target_link_libraries(ppocr_text
-    fileutils
-    imageutils
-    opencv_core
-    opencv_imgproc
-    ${LIBRKNNRT}
-)
+    target_include_directories(${target} PRIVATE
+        ${PPOCR_CPP}
+        ${LIBRKNNRT_INCLUDES}
+    )
 
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(THREADS_PREFER_PTHREAD_FLAG ON)
-    find_package(Threads REQUIRED)
-    target_link_libraries(ppocr_text Threads::Threads)
-endif()
+    target_link_libraries(${target}
+        fileutils
+        imageutils
+        opencv_core
+        opencv_imgproc
+        ${LIBRKNNRT}
+    )
+
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(THREADS_PREFER_PTHREAD_FLAG ON)
+        find_package(Threads REQUIRED)
+        target_link_libraries(${target} Threads::Threads)
+    endif()
+endforeach()
 
 set(CMAKE_INSTALL_RPATH "$ORIGIN/lib:$ORIGIN/../lib:$ORIGIN")
 
-install(TARGETS ppocr_text DESTINATION .)
+install(TARGETS ppocr_text ppocrd DESTINATION .)
+install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/deploy/S96ppocrd DESTINATION service)
 install(FILES ${LIBRKNNRT} DESTINATION lib)
 install(PROGRAMS ${MODEL_ZOO_ROOT}/3rdparty/librga/Linux/aarch64/librga.so DESTINATION lib)
 install(FILES

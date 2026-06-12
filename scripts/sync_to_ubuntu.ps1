@@ -23,11 +23,13 @@ function Copy-One($Source, $TargetDir) {
     if ($LASTEXITCODE -ne 0) { throw "Copy failed: $Source -> $TargetDir" }
 }
 
-Run-Plink "mkdir -p '$RemoteDir/src' '$RemoteDir/scripts' '$RemoteDir/tools' '$RemoteDir/models'"
+Run-Plink "mkdir -p '$RemoteDir/src' '$RemoteDir/scripts' '$RemoteDir/tools' '$RemoteDir/models' '$RemoteDir/deploy'"
 
 Copy-One (Join-Path $Root "CMakeLists.txt") $RemoteDir
 Copy-One (Join-Path $Root "README_CN.md") $RemoteDir
+Copy-One (Join-Path $Root "README.md") $RemoteDir
 Copy-One (Join-Path $Root "src\ppocr_text.cc") "$RemoteDir/src"
+Copy-One (Join-Path $Root "deploy\S96ppocrd") "$RemoteDir/deploy"
 Copy-One (Join-Path $Root "scripts\build_deploy_ubuntu.sh") "$RemoteDir/scripts"
 Copy-One (Join-Path $Root "scripts\sync_to_ubuntu.ps1") "$RemoteDir/scripts"
 Copy-One (Join-Path $Root "scripts\build_deploy_from_windows.ps1") "$RemoteDir/scripts"

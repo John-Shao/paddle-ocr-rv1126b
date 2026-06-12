@@ -10,10 +10,12 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <linux/videodev2.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "opencv2/opencv.hpp"
@@ -37,14 +39,23 @@ struct Options {
     std::string camera = "/dev/video-camera0";
     std::string snapshot_url = "http://127.0.0.1:8080/api/v1/snapshot.jpg";
     std::string image;
+    bool snapshot_url_set = false;
     int width = 1280;
     int height = 720;
     int warmup = 3;
+    std::string daemon_socket = "/run/ppocrd.sock";
     std::string tts_socket = "/run/melottsd.sock";
     int tts_priority = 4;
-    bool speak = true;
+    bool daemon = false;
+    bool speak = false;
     bool verbose = false;
 };
+
+volatile sig_atomic_t g_stop = 0;
+
+void on_signal(int) {
+    g_stop = 1;
+}
 
 const char* arg_value(int argc, char** argv, const char* key) {
     for (int i = 1; i < argc - 1; ++i) {
@@ -64,6 +75,8 @@ void usage(const char* prog) {
     std::printf(
         "Usage:\n"
         "  %s [--snapshot-url http://127.0.0.1:8080/api/v1/snapshot.jpg]\n"
+        "  %s --daemon [--daemon-socket /run/ppocrd.sock]\n"
+        "  %s --service [--speak]\n"
         "  %s --camera /dev/video-camera0 [--width 1280] [--height 720]\n"
         "  %s --image frame.jpg\n"
         "\n"
@@ -76,10 +89,14 @@ void usage(const char* prog) {
         "  --width N        camera width, default 1280\n"
         "  --height N       camera height, default 720\n"
         "  --warmup N       frames to discard before capture, default 3\n"
+        "  --daemon          run as ppocrd service, models stay loaded\n"
+        "  --daemon-socket PATH  ppocrd socket, default /run/ppocrd.sock\n"
+        "  --service         send one OCR request to ppocrd instead of running locally\n"
+        "  --speak           speak OCR text through melottsd\n"
         "  --tts-socket PATH  melottsd socket, default /run/melottsd.sock\n"
         "  --tts-priority N   melottsd priority, default 4\n"
         "  --no-tts           print text only, do not speak\n",
-        prog, prog, prog);
+        prog, prog, prog, prog, prog);
 }
 
 Options parse_options(int argc, char** argv) {
@@ -87,15 +104,22 @@ Options parse_options(int argc, char** argv) {
     if (const char* v = arg_value(argc, argv, "--det")) opt.det_model = v;
     if (const char* v = arg_value(argc, argv, "--rec")) opt.rec_model = v;
     if (const char* v = arg_value(argc, argv, "--camera")) opt.camera = v;
-    if (const char* v = arg_value(argc, argv, "--snapshot-url")) opt.snapshot_url = v;
+    if (const char* v = arg_value(argc, argv, "--snapshot-url")) {
+        opt.snapshot_url = v;
+        opt.snapshot_url_set = true;
+    }
     if (const char* v = arg_value(argc, argv, "--image")) opt.image = v;
     if (const char* v = arg_value(argc, argv, "--width")) opt.width = std::atoi(v);
     if (const char* v = arg_value(argc, argv, "--height")) opt.height = std::atoi(v);
     if (const char* v = arg_value(argc, argv, "--warmup")) opt.warmup = std::atoi(v);
+    if (const char* v = arg_value(argc, argv, "--daemon-socket")) opt.daemon_socket = v;
     if (const char* v = arg_value(argc, argv, "--tts-socket")) opt.tts_socket = v;
     if (const char* v = arg_value(argc, argv, "--tts-priority")) opt.tts_priority = std::atoi(v);
-    opt.speak = !has_flag(argc, argv, "--no-tts");
+    opt.daemon = has_flag(argc, argv, "--daemon");
+    opt.speak = has_flag(argc, argv, "--speak") && !has_flag(argc, argv, "--no-tts");
     opt.verbose = has_flag(argc, argv, "--verbose");
+    std::string prog = argv[0] ? argv[0] : "";
+    if (prog.find("ppocrd") != std::string::npos) opt.daemon = true;
     return opt;
 }
 
@@ -500,6 +524,184 @@ bool speak_text(const Options& opt, const std::string& text) {
     return std::strncmp(ack, "done", 4) == 0 || std::strncmp(ack, "preempted", 9) == 0;
 }
 
+bool write_all(int fd, const char* data, size_t len) {
+    while (len > 0) {
+        ssize_t n = write(fd, data, len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        data += n;
+        len -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+bool write_string(int fd, const std::string& text) {
+    return write_all(fd, text.data(), text.size());
+}
+
+std::string read_line(int fd, size_t max_len) {
+    std::string line;
+    while (line.size() < max_len) {
+        char ch;
+        ssize_t n = read(fd, &ch, 1);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        if (ch == '\n') break;
+        if (ch != '\r') line.push_back(ch);
+    }
+    return line;
+}
+
+std::string request_value(const std::string& req, const std::string& key) {
+    std::string prefix = key + "=";
+    size_t pos = req.find(prefix);
+    if (pos == std::string::npos) return "";
+    pos += prefix.size();
+    size_t end = req.find_first_of(" \t", pos);
+    return req.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+}
+
+bool request_flag(const std::string& req, const std::string& key) {
+    std::string v = request_value(req, key);
+    return v == "1" || v == "true" || v == "yes" || v == "on";
+}
+
+bool recognize_once(const Options& opt, ppocr_system_app_context& app, std::string* out_text) {
+    image_buffer_t image;
+    std::memset(&image, 0, sizeof(image));
+    int ret = 0;
+
+    if (!opt.image.empty()) {
+        {
+            StdoutSilencer quiet(!opt.verbose);
+            ret = read_image(opt.image.c_str(), &image);
+        }
+        if (ret != 0) {
+            std::fprintf(stderr, "read image failed: %s ret=%d\n", opt.image.c_str(), ret);
+            return false;
+        }
+    } else if (!opt.camera.empty() && opt.snapshot_url.empty()) {
+        if (!capture_camera(opt, &image)) return false;
+    } else {
+        if (!capture_snapshot(opt, &image)) return false;
+    }
+
+    ppocr_det_postprocess_params params;
+    params.threshold = kDetThreshold;
+    params.box_threshold = kBoxThreshold;
+    params.use_dilate = kUseDilation;
+    params.db_score_mode = const_cast<char*>(kDbScoreMode);
+    params.db_box_type = const_cast<char*>(kDbBoxType);
+    params.db_unclip_ratio = kDbUnclipRatio;
+
+    ppocr_text_recog_array_result_t results;
+    std::memset(&results, 0, sizeof(results));
+    {
+        StdoutSilencer quiet(!opt.verbose);
+        ret = inference_ppocr_system_model(&app, &image, &params, &results);
+    }
+
+    if (image.virt_addr) std::free(image.virt_addr);
+    if (ret != 0) {
+        std::fprintf(stderr, "OCR inference failed: ret=%d\n", ret);
+        return false;
+    }
+    *out_text = join_text(results);
+    return true;
+}
+
+bool handle_client(int fd, const Options& base_opt, ppocr_system_app_context& app) {
+    std::string req = read_line(fd, 2048);
+    Options opt = base_opt;
+    opt.speak = request_flag(req, "speak");
+    opt.verbose = request_flag(req, "verbose");
+    if (std::string v = request_value(req, "image"); !v.empty()) opt.image = v;
+    if (std::string v = request_value(req, "snapshot_url"); !v.empty()) {
+        opt.snapshot_url = v;
+        opt.image.clear();
+    }
+    if (std::string v = request_value(req, "tts_priority"); !v.empty()) opt.tts_priority = std::atoi(v.c_str());
+
+    std::string text;
+    if (!recognize_once(opt, app, &text)) {
+        write_string(fd, "ERR OCR failed\n");
+        return false;
+    }
+    std::string response = text.empty() ? std::string("[NO_TEXT]\n") : text + "\n";
+    write_string(fd, response);
+    if (opt.speak) speak_text(opt, text_for_speech(text));
+    return true;
+}
+
+int run_daemon(const Options& opt, ppocr_system_app_context& app) {
+    int server = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (server < 0) {
+        std::fprintf(stderr, "socket failed: %s\n", std::strerror(errno));
+        return 1;
+    }
+
+    unlink(opt.daemon_socket.c_str());
+    sockaddr_un addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, opt.daemon_socket.c_str(), sizeof(addr.sun_path) - 1);
+    if (bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        std::fprintf(stderr, "bind %s failed: %s\n", opt.daemon_socket.c_str(), std::strerror(errno));
+        close(server);
+        return 1;
+    }
+    chmod(opt.daemon_socket.c_str(), 0666);
+    if (listen(server, 8) < 0) {
+        std::fprintf(stderr, "listen failed: %s\n", std::strerror(errno));
+        close(server);
+        return 1;
+    }
+
+    std::printf("ppocrd listening on %s\n", opt.daemon_socket.c_str());
+    std::fflush(stdout);
+    while (!g_stop) {
+        int client = accept(server, NULL, NULL);
+        if (client < 0) {
+            if (errno == EINTR) continue;
+            std::fprintf(stderr, "accept failed: %s\n", std::strerror(errno));
+            break;
+        }
+        handle_client(client, opt, app);
+        close(client);
+    }
+    close(server);
+    unlink(opt.daemon_socket.c_str());
+    return 0;
+}
+
+int run_service_client(const Options& opt) {
+    int fd = connect_unix_socket(opt.daemon_socket);
+    if (fd < 0) {
+        std::fprintf(stderr, "cannot connect ppocrd %s: %s\n", opt.daemon_socket.c_str(), std::strerror(errno));
+        return 1;
+    }
+    std::string req = "ocr";
+    if (opt.speak) req += " speak=1";
+    if (opt.verbose) req += " verbose=1";
+    if (!opt.image.empty()) req += " image=" + opt.image;
+    if (opt.snapshot_url_set) req += " snapshot_url=" + opt.snapshot_url;
+    req += "\n";
+    if (!write_string(fd, req)) {
+        std::fprintf(stderr, "write ppocrd request failed\n");
+        close(fd);
+        return 1;
+    }
+    char buf[4096];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        write_all(STDOUT_FILENO, buf, static_cast<size_t>(n));
+    }
+    close(fd);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -509,6 +711,12 @@ int main(int argc, char** argv) {
     }
 
     Options opt = parse_options(argc, argv);
+    if (has_flag(argc, argv, "--service")) {
+        return run_service_client(opt);
+    }
+
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
 
     ppocr_system_app_context app;
     std::memset(&app, 0, sizeof(app));
@@ -527,49 +735,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    image_buffer_t image;
-    std::memset(&image, 0, sizeof(image));
-    if (!opt.image.empty()) {
-        {
-            StdoutSilencer quiet(!opt.verbose);
-            ret = read_image(opt.image.c_str(), &image);
-        }
-        if (ret != 0) {
-            std::fprintf(stderr, "read image failed: %s ret=%d\n", opt.image.c_str(), ret);
-            release_ppocr_model(&app.rec_context);
-            release_ppocr_model(&app.det_context);
-            return 1;
-        }
-    } else if (arg_value(argc, argv, "--camera")) {
-        if (!capture_camera(opt, &image)) {
-            release_ppocr_model(&app.rec_context);
-            release_ppocr_model(&app.det_context);
-            return 1;
-        }
-    } else if (!capture_snapshot(opt, &image)) {
+    if (opt.daemon) {
+        int rc = run_daemon(opt, app);
         release_ppocr_model(&app.rec_context);
         release_ppocr_model(&app.det_context);
-        return 1;
+        return rc;
     }
 
-    ppocr_det_postprocess_params params;
-    params.threshold = kDetThreshold;
-    params.box_threshold = kBoxThreshold;
-    params.use_dilate = kUseDilation;
-    params.db_score_mode = const_cast<char*>(kDbScoreMode);
-    params.db_box_type = const_cast<char*>(kDbBoxType);
-    params.db_unclip_ratio = kDbUnclipRatio;
-
-    ppocr_text_recog_array_result_t results;
-    std::memset(&results, 0, sizeof(results));
-    {
-        StdoutSilencer quiet(!opt.verbose);
-        ret = inference_ppocr_system_model(&app, &image, &params, &results);
-    }
-    if (ret != 0) {
-        std::fprintf(stderr, "OCR inference failed: ret=%d\n", ret);
-    } else {
-        std::string text = join_text(results);
+    if (arg_value(argc, argv, "--camera")) opt.snapshot_url.clear();
+    std::string text;
+    bool ok = recognize_once(opt, app, &text);
+    if (ok) {
         if (text.empty()) {
             std::printf("[NO_TEXT]\n");
         } else {
@@ -580,8 +756,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (image.virt_addr) std::free(image.virt_addr);
     release_ppocr_model(&app.rec_context);
     release_ppocr_model(&app.det_context);
-    return ret == 0 ? 0 : 1;
+    return ok ? 0 : 1;
 }

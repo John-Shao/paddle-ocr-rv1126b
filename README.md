@@ -2,14 +2,16 @@
 
 [中文](README_CN.md) | English
 
-Pure C/C++ OCR text recognition and speech playback for RV1126B:
+Pure C/C++ OCR daemon and CLI for RV1126B:
 
 ```text
-board camera snapshot -> PP-OCRv4 RKNN -> stdout text -> melottsd playback
+board camera snapshot -> ppocrd(PP-OCRv4 RKNN) -> text
 ```
 
-When text is recognized, the program speaks the recognized text. When no text is
-recognized, it speaks `没有识别到文字信息`.
+`ppocrd` runs in the background and keeps the PPOCR models loaded. By default it
+only returns text. Speech is optional and is enabled per request with `--speak`.
+When no text is recognized, it returns `[NO_TEXT]`; in speech mode it says
+`没有识别到文字信息`.
 
 ## Constraints
 
@@ -17,7 +19,8 @@ recognized, it speaks `没有识别到文字信息`.
 - ONNX -> RKNN conversion is done offline on the Ubuntu cross-compilation host only.
 - The board does not open `/dev/video-camera0` by default, to avoid competing with `camera_core_d`.
 - The default capture source is the on-board snapshot endpoint: `http://127.0.0.1:8080/api/v1/snapshot.jpg`.
-- Speech playback is enabled by default through `/run/melottsd.sock` from `melotts-rv1126b`.
+- `ppocrd` listens on `/run/ppocrd.sock` as the base OCR service.
+- TTS is optional and uses `/run/melottsd.sock` from `melotts-rv1126b`.
 
 ## Environment
 
@@ -48,7 +51,8 @@ $env:BOARD_PW="..."
 
 ```text
 CMakeLists.txt                  C++ build configuration
-src/ppocr_text.cc               board-side OCR CLI
+src/ppocr_text.cc               board-side OCR CLI / ppocrd daemon
+deploy/S96ppocrd                Buildroot init script
 scripts/build_deploy_ubuntu.sh  convert, cross-compile, and deploy from Ubuntu
 scripts/sync_to_ubuntu.ps1      sync source/models from Windows to Ubuntu
 scripts/build_deploy_from_windows.ps1
@@ -124,23 +128,51 @@ BOARD_DIR=/data/ppocr-text
 SKIP_DEPLOY=1
 ```
 
-## Run On The Board
+## Board Service
 
-Run remotely from Windows:
+Deployment installs:
+
+```text
+/data/ppocr-text/ppocrd
+/data/ppocr-text/ppocr_text
+/etc/init.d/S96ppocrd
+```
+
+Start/stop the service:
+
+```sh
+/etc/init.d/S96ppocrd start
+/etc/init.d/S96ppocrd stop
+/etc/init.d/S96ppocrd restart
+/etc/init.d/S96ppocrd status
+```
+
+When running, the service keeps the models loaded and listens on:
+
+```text
+/run/ppocrd.sock
+```
+
+## Client Usage
+
+Request `ppocrd` remotely from Windows. By default it only prints text:
 
 ```powershell
 $env:BOARD_PW="<board-password>"
-.\scripts\run_board.ps1
+.\scripts\run_board.ps1 -ProgramArgs "--service"
 
-# Run with arguments, for example recognize a still image without speech
-.\scripts\run_board.ps1 -ProgramArgs "--image test.jpg --no-tts"
+# Ask ppocrd to recognize a still image
+.\scripts\run_board.ps1 -ProgramArgs "--service --image test.jpg"
+
+# Ask ppocrd to recognize and speak the result
+.\scripts\run_board.ps1 -ProgramArgs "--service --speak"
 ```
 
 Run directly on the board:
 
 ```sh
 cd /data/ppocr-text
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service
 ```
 
 Output format:
@@ -148,26 +180,26 @@ Output format:
 ```text
 Text recognized: UTF-8 text, one line per OCR line
 No text:         [NO_TEXT]
-Speech:          enabled by default
+Speech:          disabled by default, enable with --speak
 ```
 
 Other commands:
 
 ```sh
 # Recognize a still image
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --image test.jpg
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --image test.jpg
 
 # Override the snapshot URL
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --snapshot-url http://127.0.0.1:8080/api/v1/snapshot.jpg
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service
 
-# Debug mode: print RKNN tensor information
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --verbose
+# Request OCR and speech playback
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --speak
 
-# Print text only, do not call TTS
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --no-tts
+# Run once without the daemon, loading models in this process
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --image test.jpg
 
-# Override the melottsd socket and playback priority
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --tts-socket /run/melottsd.sock --tts-priority 4
+# Run the daemon manually in the foreground
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocrd --daemon
 
 # Use only when the camera is not occupied by camera_core_d
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 1280 --height 720
@@ -178,17 +210,18 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 
 The board has been deployed successfully at `/data/ppocr-text`.
 
 ```text
-./ppocr_text --image test.jpg
+/etc/init.d/S96ppocrd restart
+./ppocr_text --service --image test.jpg
 ```
 
-Recognizes Chinese text from the Rockchip PPOCR-System test image.
+Recognizes Chinese text from the Rockchip PPOCR-System test image through the resident `ppocrd`.
 
 ```text
-./ppocr_text
+./ppocr_text --service
 ```
 
-Captures the current camera frame through the `camera_core_d` snapshot endpoint. If the current scene contains no recognizable text, it prints `[NO_TEXT]`.
-It also calls melottsd to speak the recognized text. If no text is recognized, it speaks `没有识别到文字信息`.
+Captures the current camera frame through the `camera_core_d` snapshot endpoint and returns text. It does not speak by default.
+With `--speak`, it calls melottsd. If no text is recognized, it prints `[NO_TEXT]` and speaks `没有识别到文字信息`.
 
 ## Documentation Sync
 

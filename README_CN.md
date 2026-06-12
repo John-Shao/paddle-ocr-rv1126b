@@ -2,13 +2,15 @@
 
 中文 | [English](README.md)
 
-RV1126B 上的纯 C/C++ OCR 文字识别和语音播报程序：
+RV1126B 上的纯 C/C++ OCR 基础服务和命令行工具：
 
 ```text
-板端摄像头 snapshot -> PP-OCRv4 RKNN -> stdout 文本 -> melottsd 播放
+板端摄像头 snapshot -> ppocrd(PP-OCRv4 RKNN) -> 文本
 ```
 
-识别到文字时播放识别文本；未识别到文字时播放“没有识别到文字信息”。
+`ppocrd` 常驻后台并预加载 PPOCR 模型，默认只输出文字；调用方显式传 `--speak`
+时才通过 `melotts-rv1126b` 播放语音。未识别到文字时输出 `[NO_TEXT]`，播报模式下
+播放“没有识别到文字信息”。
 
 ## 约束
 
@@ -16,7 +18,8 @@ RV1126B 上的纯 C/C++ OCR 文字识别和语音播报程序：
 - ONNX -> RKNN 只在 Ubuntu 交叉编译机上离线完成。
 - 板端默认不直接打开 `/dev/video-camera0`，避免和 `camera_core_d` 抢摄像头。
 - 默认通过板内接口抓图：`http://127.0.0.1:8080/api/v1/snapshot.jpg`。
-- 默认通过 `/run/melottsd.sock` 调用板端 `melotts-rv1126b` 播放语音。
+- `ppocrd` 默认监听 `/run/ppocrd.sock`，作为基础 OCR 服务。
+- TTS 是可选能力，通过 `/run/melottsd.sock` 调用板端 `melotts-rv1126b`。
 
 ## 环境
 
@@ -47,7 +50,8 @@ $env:BOARD_PW="..."
 
 ```text
 CMakeLists.txt                  C++ 程序构建配置
-src/ppocr_text.cc               板端 OCR CLI
+src/ppocr_text.cc               板端 OCR CLI / ppocrd daemon
+deploy/S96ppocrd                Buildroot init 脚本
 scripts/build_deploy_ubuntu.sh  Ubuntu 上转换、交叉编译、部署
 scripts/sync_to_ubuntu.ps1      Windows -> Ubuntu 同步源码/模型
 scripts/build_deploy_from_windows.ps1
@@ -123,23 +127,51 @@ BOARD_DIR=/data/ppocr-text
 SKIP_DEPLOY=1
 ```
 
-## 板端运行
+## 板端服务
 
-Windows 远程运行：
+部署后会安装：
+
+```text
+/data/ppocr-text/ppocrd
+/data/ppocr-text/ppocr_text
+/etc/init.d/S96ppocrd
+```
+
+启动/停止服务：
+
+```sh
+/etc/init.d/S96ppocrd start
+/etc/init.d/S96ppocrd stop
+/etc/init.d/S96ppocrd restart
+/etc/init.d/S96ppocrd status
+```
+
+服务启动后，模型常驻内存，监听：
+
+```text
+/run/ppocrd.sock
+```
+
+## 客户端运行
+
+Windows 远程请求 `ppocrd`，默认只输出文字：
 
 ```powershell
 $env:BOARD_PW="<board-password>"
-.\scripts\run_board.ps1
+.\scripts\run_board.ps1 -ProgramArgs "--service"
 
-# 带参数运行，例如识别静态图片且不播报
-.\scripts\run_board.ps1 -ProgramArgs "--image test.jpg --no-tts"
+# 请求 ppocrd 识别静态图片
+.\scripts\run_board.ps1 -ProgramArgs "--service --image test.jpg"
+
+# 请求 ppocrd 并播报结果
+.\scripts\run_board.ps1 -ProgramArgs "--service --speak"
 ```
 
 直接在板子上运行：
 
 ```sh
 cd /data/ppocr-text
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service
 ```
 
 输出规则：
@@ -147,26 +179,26 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text
 ```text
 识别到文字：逐行输出 UTF-8 文本
 未识别到文字：[NO_TEXT]
-语音播报：默认开启
+语音播报：默认关闭，传 --speak 开启
 ```
 
 其他命令：
 
 ```sh
 # 识别静态图片
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --image test.jpg
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --image test.jpg
 
 # 指定 snapshot URL
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --snapshot-url http://127.0.0.1:8080/api/v1/snapshot.jpg
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service
 
-# 调试模式，输出 RKNN tensor 信息
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --verbose
+# 请求服务并播报
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --service --speak
 
-# 只输出文本，不调用 TTS
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --no-tts
+# 不走 daemon，一次性本地加载模型并识别
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --image test.jpg
 
-# 指定 melottsd socket 和播放优先级
-LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --tts-socket /run/melottsd.sock --tts-priority 4
+# 手动前台运行 daemon
+LD_LIBRARY_PATH=./lib:/usr/lib ./ppocrd --daemon
 
 # 仅在摄像头未被 camera_core_d 占用时使用
 LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 1280 --height 720
@@ -177,17 +209,18 @@ LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text --camera /dev/video-camera0 --width 
 板端 `/data/ppocr-text` 已部署成功。
 
 ```text
-./ppocr_text --image test.jpg
+/etc/init.d/S96ppocrd restart
+./ppocr_text --service --image test.jpg
 ```
 
-可识别瑞芯微 PPOCR-System 测试图中的中文文本。
+可通过常驻 `ppocrd` 识别瑞芯微 PPOCR-System 测试图中的中文文本。
 
 ```text
-./ppocr_text
+./ppocr_text --service
 ```
 
-可通过 `camera_core_d` snapshot 抓取当前摄像头画面，并调用 melottsd 播放识别文本。
-当前画面无文字时输出 `[NO_TEXT]`，并播放“没有识别到文字信息”。
+可通过 `camera_core_d` snapshot 抓取当前摄像头画面并返回文字。默认不播报。
+传 `--speak` 时调用 melottsd；当前画面无文字时输出 `[NO_TEXT]`，并播放“没有识别到文字信息”。
 
 ## 文档同步
 

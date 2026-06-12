@@ -81,10 +81,13 @@ else
     SSH=(ssh -o StrictHostKeyChecking=no)
     SCP=(scp -o StrictHostKeyChecking=no)
 fi
+"${SSH[@]}" "$BOARD" "if [ -x /etc/init.d/S96ppocrd ]; then /etc/init.d/S96ppocrd stop || true; fi"
 "${SSH[@]}" "$BOARD" "mkdir -p '$BOARD_DIR'"
 "${SCP[@]}" -r "$INSTALL_DIR/"* "$BOARD:$BOARD_DIR/"
+"${SSH[@]}" "$BOARD" "if [ -f '$BOARD_DIR/service/S96ppocrd' ]; then cp '$BOARD_DIR/service/S96ppocrd' /etc/init.d/S96ppocrd && chmod +x /etc/init.d/S96ppocrd; fi"
 
 echo "DONE"
 echo "Run on board:"
 echo "  cd $BOARD_DIR"
 echo "  LD_LIBRARY_PATH=./lib:/usr/lib ./ppocr_text"
+echo "  /etc/init.d/S96ppocrd restart"
